@@ -1,0 +1,12 @@
+gymnasium[atari,accept-rom-license]==0.29.1
+ale-py==0.8.1
+stable-baselines3==2.3.2
+torch>=2.0.0
+numpy>=1.24.0
+imageio>=2.34.0
+imageio-ffmpeg>=0.5.1
+tensorboard>=2.14.0
+opencv-python>=4.8.0
+tqdm>=4.66.0
+rich>=13.7.0
+psutil>=5.9.0

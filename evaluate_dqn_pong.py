@@ -20,6 +20,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--frame-stack", type=int, default=4)
+    parser.add_argument(
+        "--minimal-actions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use reduced Pong action space (must match training setup).",
+    )
     parser.add_argument("--output-dir", type=str, default="evaluation")
     parser.add_argument("--fps", type=int, default=20)
     return parser.parse_args()
@@ -54,6 +60,7 @@ def main() -> None:
         seed=args.seed,
         frame_stack=args.frame_stack,
         clip_reward=False,
+        minimal_actions=args.minimal_actions,
         render_mode="rgb_array",
     )
 

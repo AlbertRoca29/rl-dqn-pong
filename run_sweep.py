@@ -110,6 +110,140 @@ def build_screen_design(
     return deduped
 
 
+def build_full_night_screen_runs(
+    lr_values: list[float],
+    buffer_values: list[int],
+    final_eps_values: list[float],
+    policy_values: list[str],
+    run_prefix: str,
+    ofat_warmup_condition: str,
+    interaction_runs: int,
+    greedy_lr: float | None,
+    greedy_buffer: int | None,
+    greedy_final_eps: float | None,
+    greedy_policy: str | None,
+) -> tuple[list[RunConfig], bool]:
+    if not (
+        len(lr_values) == len(buffer_values) == len(final_eps_values) == len(policy_values) == 3
+    ):
+        raise ValueError("full_night_screen expects exactly 3 values for each sweep dimension.")
+
+    baseline = {
+        "learning_rate": lr_values[1],
+        "buffer_size": buffer_values[1],
+        "exploration_final_eps": final_eps_values[1],
+        "policy_variant": policy_values[1],
+    }
+
+    ofat_use_warmup = ofat_warmup_condition == "warm"
+    runs: list[RunConfig] = []
+    seen_run_names: set[str] = set()
+
+    def cfg_tag(cfg: dict) -> str:
+        lr = f"lr{cfg['learning_rate']:.0e}".replace("+", "")
+        buf = f"buf{cfg['buffer_size'] // 1000}k"
+        eps = f"feps{str(cfg['exploration_final_eps']).replace('.', 'p')}"
+        pol = f"policy{cfg['policy_variant']}"
+        return f"{lr}_{buf}_{eps}_{pol}"
+
+    def add_run(cfg: dict, use_warmup: bool, minimal_actions: bool, experiment_label: str) -> None:
+        warm_label = "warmup_on" if use_warmup else "warmup_off"
+        min_label = "minimal_actions_on" if minimal_actions else "minimal_actions_off"
+        run_name = (
+            f"{run_prefix}_{experiment_label}_{warm_label}_{min_label}_{cfg_tag(cfg)}"
+        )
+        if run_name in seen_run_names:
+            return
+        seen_run_names.add(run_name)
+        runs.append(
+            RunConfig(
+                run_name=run_name,
+                learning_rate=cfg["learning_rate"],
+                buffer_size=cfg["buffer_size"],
+                exploration_final_eps=cfg["exploration_final_eps"],
+                policy_variant=cfg["policy_variant"],
+                use_warmup=use_warmup,
+                minimal_actions=minimal_actions,
+            )
+        )
+
+    # 1) Warm-up impact at baseline: one pair (warm vs cold), minimal-actions ON.
+    add_run(baseline, True, True, "q1_warmup_effect_baseline_pair")
+    add_run(baseline, False, True, "q1_warmup_effect_baseline_pair")
+
+    # 2) OFAT sensitivity: vary one factor at a time using a single warm-up condition.
+    factors = {
+        "learning_rate": lr_values,
+        "buffer_size": buffer_values,
+        "exploration_final_eps": final_eps_values,
+        "policy_variant": policy_values,
+    }
+    for factor_name, values in factors.items():
+        for idx, level_tag in ((0, "low"), (2, "high")):
+            cfg = dict(baseline)
+            cfg[factor_name] = values[idx]
+            add_run(
+                cfg,
+                ofat_use_warmup,
+                True,
+                f"q2_ofat_sensitivity_{factor_name}_{level_tag}",
+            )
+
+    # 3) Minimal-actions impact: one pair at baseline under the OFAT warm-up condition.
+    add_run(
+        baseline,
+        ofat_use_warmup,
+        False,
+        "q3_minimal_actions_effect_baseline_pair",
+    )
+
+    # 4) Greedy best-combo run (optional): user provides best levels from OFAT.
+    greedy_added = False
+    if (
+        greedy_lr is not None
+        and greedy_buffer is not None
+        and greedy_final_eps is not None
+        and greedy_policy is not None
+    ):
+        if greedy_policy not in policy_values:
+            raise ValueError(
+                f"greedy-policy must be one of {policy_values}, got: {greedy_policy}"
+            )
+        greedy_cfg = {
+            "learning_rate": greedy_lr,
+            "buffer_size": greedy_buffer,
+            "exploration_final_eps": greedy_final_eps,
+            "policy_variant": greedy_policy,
+        }
+        add_run(greedy_cfg, ofat_use_warmup, True, "q4_greedy_best_combo")
+        greedy_added = True
+
+    # 5) Targeted interaction runs: policy size x learning-rate.
+    if interaction_runs >= 1:
+        cfg_high_lr_large = dict(baseline)
+        cfg_high_lr_large["learning_rate"] = lr_values[2]
+        cfg_high_lr_large["policy_variant"] = policy_values[2]
+        add_run(
+            cfg_high_lr_large,
+            ofat_use_warmup,
+            True,
+            "q5_interaction_policy_large_lr_high",
+        )
+
+    if interaction_runs >= 2:
+        cfg_low_lr_large = dict(baseline)
+        cfg_low_lr_large["learning_rate"] = lr_values[0]
+        cfg_low_lr_large["policy_variant"] = policy_values[2]
+        add_run(
+            cfg_low_lr_large,
+            ofat_use_warmup,
+            True,
+            "q5_interaction_policy_large_lr_low",
+        )
+
+    return runs, greedy_added
+
+
 def make_run_name(prefix: str, cfg: dict, use_warmup: bool) -> str:
     lr_tag = f"lr{cfg['learning_rate']:.0e}".replace("+", "")
     buf_tag = f"buf{cfg['buffer_size'] // 1000}k"
@@ -199,7 +333,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--final-eps-values", type=str, default="0.005,0.01,0.02")
     parser.add_argument("--policy-values", type=str, default="small,base,large")
 
-    parser.add_argument("--design", choices=["screen", "full"], default="screen")
+    parser.add_argument(
+        "--design",
+        choices=["screen", "full", "full_night_screen"],
+        default="screen",
+    )
+    parser.add_argument(
+        "--full-night-ofat-warmup",
+        choices=["warm", "cold"],
+        default="warm",
+        help="For full_night_screen: warm-up condition used in OFAT, minimal-actions pair, and interaction runs.",
+    )
+    parser.add_argument(
+        "--interaction-runs",
+        type=int,
+        choices=[1, 2],
+        default=2,
+        help="For full_night_screen: number of targeted policy-size x LR interaction runs.",
+    )
+    parser.add_argument(
+        "--greedy-lr",
+        type=float,
+        default=None,
+        help="For full_night_screen: greedy best-combo learning rate from OFAT findings.",
+    )
+    parser.add_argument(
+        "--greedy-buffer",
+        type=int,
+        default=None,
+        help="For full_night_screen: greedy best-combo replay buffer size from OFAT findings.",
+    )
+    parser.add_argument(
+        "--greedy-final-eps",
+        type=float,
+        default=None,
+        help="For full_night_screen: greedy best-combo final epsilon from OFAT findings.",
+    )
+    parser.add_argument(
+        "--greedy-policy",
+        type=str,
+        default=None,
+        help="For full_night_screen: greedy best-combo policy variant from OFAT findings.",
+    )
     parser.add_argument(
         "--warmup-conditions",
         choices=["both", "warm", "cold"],
@@ -221,12 +396,41 @@ def main() -> None:
     final_eps_values = parse_csv_floats(args.final_eps_values)
     policy_values = parse_csv_strings(args.policy_values)
 
-    if args.design == "screen":
-        design = build_screen_design(lr_values, buffer_values, final_eps_values, policy_values)
+    greedy_added = False
+    if args.design == "full_night_screen":
+        run_list, greedy_added = build_full_night_screen_runs(
+            lr_values,
+            buffer_values,
+            final_eps_values,
+            policy_values,
+            args.run_prefix,
+            args.full_night_ofat_warmup,
+            args.interaction_runs,
+            args.greedy_lr,
+            args.greedy_buffer,
+            args.greedy_final_eps,
+            args.greedy_policy,
+        )
     else:
-        design = build_full_design(lr_values, buffer_values, final_eps_values, policy_values)
+        if args.design == "screen":
+            design = build_screen_design(lr_values, buffer_values, final_eps_values, policy_values)
+        else:
+            design = build_full_design(lr_values, buffer_values, final_eps_values, policy_values)
 
-    if args.warmup_conditions in {"warm", "both"}:
+        run_list = list(
+            iter_runs(
+                design,
+                args.run_prefix,
+                args.warmup_conditions,
+                args.minimal_actions_mode,
+            )
+        )
+
+    needs_warmup_buffer = args.design == "full_night_screen" or args.warmup_conditions in {
+        "warm",
+        "both",
+    }
+    if needs_warmup_buffer:
         warmup_path = Path(args.warmup_buffer)
         if not warmup_path.exists():
             raise FileNotFoundError(
@@ -234,14 +438,6 @@ def main() -> None:
                 "Create it first with --warmup-only in train_dqn_pong.py"
             )
 
-    run_list = list(
-        iter_runs(
-            design,
-            args.run_prefix,
-            args.warmup_conditions,
-            args.minimal_actions_mode,
-        )
-    )
     if args.max_runs > 0:
         run_list = run_list[: args.max_runs]
 
@@ -254,6 +450,9 @@ def main() -> None:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "design": args.design,
         "warmup_conditions": args.warmup_conditions,
+        "full_night_ofat_warmup": args.full_night_ofat_warmup,
+        "interaction_runs": args.interaction_runs,
+        "greedy_run_included": greedy_added,
         "total_runs": len(run_list),
         "defaults": {
             "total_timesteps": args.total_timesteps,
@@ -270,6 +469,11 @@ def main() -> None:
 
     print(f"Planned runs: {len(run_list)}")
     print(f"Manifest: {manifest_path}")
+    if args.design == "full_night_screen" and not greedy_added:
+        print(
+            "Note: greedy best-combo run not added. Provide --greedy-lr, --greedy-buffer, "
+            "--greedy-final-eps, and --greedy-policy after OFAT analysis."
+        )
 
     if args.dry_run:
         for i, run_cfg in enumerate(run_list, start=1):
@@ -278,8 +482,16 @@ def main() -> None:
 
     completed = 0
     failed = 0
+    skipped = 0
 
     for i, run_cfg in enumerate(run_list, start=1):
+        # Check if run has already been completed
+        run_dir = Path(args.log_dir) / run_cfg.run_name
+        if run_dir.exists():
+            skipped += 1
+            print(f"\n[{i:03d}/{len(run_list):03d}] Skipping {run_cfg.run_name} (already completed)")
+            continue
+
         cmd = [
             args.python,
             args.train_script,
@@ -334,6 +546,7 @@ def main() -> None:
     print("\nSweep finished")
     print(f"Completed: {completed}")
     print(f"Failed: {failed}")
+    print(f"Skipped: {skipped}")
 
 
 if __name__ == "__main__":

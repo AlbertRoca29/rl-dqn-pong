@@ -78,11 +78,6 @@ python train_dqn_pong.py \
   --load-replay-buffer runs/shared/warmup_50k.pkl
 ```
 
-Notes for report quality:
-- This is great for fast screening and iteration.
-- For final conclusions, rerun best settings from scratch (no shared warm-up)
-  and with multiple seeds to avoid bias from one initial replay dataset.
-
 ### Overnight multi-experiment sweep
 
 Use `run_sweep.py` to launch many runs while you are away.
@@ -142,15 +137,26 @@ Outputs:
 - `evaluation_baseline/best_episode.gif`
 
 
-## Notes
+## 5) Grad-CAM analysis + x-axis importance histogram
 
-- `--minimal-actions` is an environment-side optimization for Pong: it reduces
-  the action space to no-op + two movement actions, which often improves
-  sample efficiency without changing DQN hyperparameters.
-- For a strong Pong score with DQN, training usually needs more than 1M timesteps (often several million).
-- If your machine is slow, start with fewer timesteps for debugging and then launch long runs.
-- If you have ROM/environment issues, reinstall Atari extras:
+To inspect where the DQN focuses in the input and extract per-column
+importance along the x-axis:
 
-<!-- ```bash
-pip install "gymnasium[atari,accept-rom-license]"
-``` -->
+```bash
+python gradcam_dqn_pong.py \
+  --model-path runs/dqn_baseline/models/best_model.zip \
+  --episodes 10 \
+  --minimal-actions \
+  --sample-every 4 \
+  --save-gifs \
+  --gif-fps 12 \
+  --output-dir gradcam_baseline
+```
+
+Outputs in `gradcam_baseline/`:
+- `x_axis_importance.csv`: histogram with one row per image column (`x_column`, `importance`).
+- `x_axis_importance.npy`: same histogram as NumPy array.
+- `x_axis_importance_histogram.png`: visual histogram of x-axis importance.
+- `gradcam_summary.json`: run metadata + top-most important columns.
+- `overlays/`: frame overlays (if `--save-overlays`, enabled by default).
+- `gifs/gradcam_episode_XXX.gif`: Grad-CAM GIF per episode (if `--save-gifs`, enabled by default).
